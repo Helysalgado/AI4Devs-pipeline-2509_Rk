@@ -9,10 +9,6 @@ generator client {
   binaryTargets = ["native", "debian-openssl-3.0.x"]
 }
 
-#datasource db {
-#  provider = "postgresql"
-#  url      = "postgresql://LTIdbUser:D1ymf8wyQEGthFR1E9xhCq@localhost:5432/LTIdb"
-#}
 
 datasource db {
   provider = "postgresql"

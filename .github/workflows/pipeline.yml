@@ -124,14 +124,25 @@ jobs:
             set -euo pipefail
 
             APP_DIR="${APP_DIR:-/home/ubuntu/app}"
+            # Safety checks: avoid catastrophic deletion if APP_DIR is wrong
+            if [ -z "$APP_DIR" ] || [ "$APP_DIR" = "/" ] || [ "$APP_DIR" = "/home" ] || [ "$APP_DIR" = "/home/ubuntu" ]; then
+              echo "ERROR: APP_DIR is unsafe: '$APP_DIR'"
+              exit 1
+            fi
+
             mkdir -p "$APP_DIR/current"
             cd "$APP_DIR"
 
-            rm -rf current/*
+            rm -rf "$APP_DIR/current"/*
             tar -xzf backend-artifact.tar.gz -C "$APP_DIR/current"
             cd "$APP_DIR/current/backend"
 
             # Write runtime env (only what we need)
+            if [ -z "${DATABASE_URL:-}" ]; then
+              echo "ERROR: DATABASE_URL secret is not set"
+              exit 1
+            fi
+
             echo "DATABASE_URL=${DATABASE_URL}" > .env
 
             npm ci --omit=dev
