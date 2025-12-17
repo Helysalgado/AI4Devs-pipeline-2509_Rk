@@ -2,7 +2,6 @@
 
 Este documento recoge los prompts utilizados para diseñar y generar el pipeline de CI/CD del backend mediante asistentes de IA, como parte del ejercicio.
 
----
 
 ## 1. Prompt para tests de backend
 

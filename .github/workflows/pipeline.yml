@@ -1,45 +1,22 @@
-name: Backend pipeline (tests, build, deploy to EC2)
+name: Backend CI/CD (PR=CI, main=Deploy)
 
 on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
   push:
-    branches-ignore:
-      - main
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
-  pull-requests: read
 
 jobs:
-  check_pr_open:
-    runs-on: ubuntu-latest
-    outputs:
-      has_pr: ${{ steps.prcheck.outputs.has_pr }}
-    steps:
-      - name: Install jq
-        run: sudo apt-get update && sudo apt-get install -y jq
-
-      - name: Check if branch has an open PR
-        id: prcheck
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          OWNER: ${{ github.repository_owner }}
-          BRANCH: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          url="https://api.github.com/repos/${REPO}/pulls?state=open&head=${OWNER}:${BRANCH}"
-          count=$(curl -sS -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "${url}" | jq 'length')
-          if [ "$count" -gt 0 ]; then
-            echo "Open PR found for ${OWNER}:${BRANCH}"
-            echo "has_pr=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "No open PR for ${OWNER}:${BRANCH}. Skipping pipeline."
-            echo "has_pr=false" >> "$GITHUB_OUTPUT"
-          fi
-
-  test_build_deploy:
-    needs: check_pr_open
-    if: needs.check_pr_open.outputs.has_pr == 'true'
+  ci-backend:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
 
     services:
@@ -100,12 +77,32 @@ jobs:
             backend/package-lock.json \
             backend/prisma
 
-      - name: Install SSH key
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-artifact
+          path: backend-artifact.tar.gz
+
+  deploy-backend:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-artifact
+
+      - name: Install SSH key (uses LIDRKEY)
         run: |
           set -euo pipefail
           mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
+          echo "${{ secrets.LIDRKEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
+
+          # Validate key format early
+          ssh-keygen -lf ~/.ssh/id_rsa >/dev/null
+
           ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts
 
       - name: Copy artifact to EC2
@@ -115,15 +112,14 @@ jobs:
             "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:${{ secrets.APP_DIR }}/backend-artifact.tar.gz"
 
       - name: Deploy on EC2 (install, migrate, restart)
-        env:
-          APP_DIR: ${{ secrets.APP_DIR }}
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
           set -euo pipefail
-          ssh -i ~/.ssh/id_rsa "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" << 'EOF'
+          ssh -i ~/.ssh/id_rsa "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" \
+          "APP_DIR='${{ secrets.APP_DIR }}' DATABASE_URL='${{ secrets.DATABASE_URL }}' bash -s" <<'EOF'
             set -euo pipefail
 
             APP_DIR="${APP_DIR:-/home/ubuntu/app}"
+
             # Safety checks: avoid catastrophic deletion if APP_DIR is wrong
             if [ -z "$APP_DIR" ] || [ "$APP_DIR" = "/" ] || [ "$APP_DIR" = "/home" ] || [ "$APP_DIR" = "/home/ubuntu" ]; then
               echo "ERROR: APP_DIR is unsafe: '$APP_DIR'"
@@ -131,30 +127,36 @@ jobs:
             fi
 
             mkdir -p "$APP_DIR/current"
-            cd "$APP_DIR"
-
             rm -rf "$APP_DIR/current"/*
-            tar -xzf backend-artifact.tar.gz -C "$APP_DIR/current"
+
+            # Unpack artifact into $APP_DIR/current/backend/...
+            tar -xzf "$APP_DIR/backend-artifact.tar.gz" -C "$APP_DIR/current"
             cd "$APP_DIR/current/backend"
 
-            # Write runtime env (only what we need)
+            # Write runtime env
             if [ -z "${DATABASE_URL:-}" ]; then
-              echo "ERROR: DATABASE_URL secret is not set"
+              echo "ERROR: DATABASE_URL is empty on remote"
               exit 1
             fi
+            echo "DATABASE_URL=$DATABASE_URL" > .env
 
-            echo "DATABASE_URL=${DATABASE_URL}" > .env
-
-            npm ci --omit=dev
+            # Prisma CLI is in devDependencies -> do NOT omit dev
+            npm ci
             npm run prisma:generate
             npx prisma migrate deploy
 
+            # Start/restart via PM2 using package.json start (node dist/index.js)
             if pm2 describe backend >/dev/null 2>&1; then
-              pm2 restart backend
+              pm2 restart backend --update-env
             else
-              pm2 start dist/index.js --name backend
+              pm2 start npm --name backend -- start
             fi
 
             pm2 save
-          EOF
 
+            echo "✅ PM2 status:"
+            pm2 status
+
+            echo "✅ Local health check:"
+            curl -fsS http://localhost:3000 >/dev/null && echo "Backend responding on :3000"
+EOF
