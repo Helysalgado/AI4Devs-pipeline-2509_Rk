@@ -131,7 +131,7 @@ jobs:
           fi
           echo "DATABASE_URL=$DATABASE_URL" > .env
           echo "NODE_ENV=production" >> .env
-          echo "PORT=3000" >> .env
+          echo "PORT=3010" >> .env
           echo "Installing dependencies..."
           npm ci
           echo "Generating Prisma Client..."
@@ -148,8 +148,8 @@ jobs:
           echo "Deployment completed"
           pm2 status
           sleep 3
-          if curl -fsS http://localhost:3000 >/dev/null 2>&1; then
-            echo "Backend responding on port 3000"
+          if curl -fsS http://localhost:3010 >/dev/null 2>&1; then
+            echo "Backend responding on port 3010"
           else
             echo "Backend may need more time to start"
           fi
