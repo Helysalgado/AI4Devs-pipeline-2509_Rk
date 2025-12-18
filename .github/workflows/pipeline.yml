@@ -1,22 +1,63 @@
-name: Backend CI/CD (PR=CI, main=Deploy)
+name: Backend CI/CD Pipeline (Push con PR abierto)
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
-    branches: [main]
   push:
-    branches: [main]
+    branches-ignore:
+      - main  # Opcional: excluir main si solo quieres que funcione en ramas de feature
+
+permissions:
+  contents: read
+  pull-requests: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-permissions:
-  contents: read
-
 jobs:
+  # Job 1: Verificar si la rama tiene un Pull Request abierto
+  check-pr-open:
+    name: Check if PR is open
+    runs-on: ubuntu-latest
+    outputs:
+      has_pr: ${{ steps.check.outputs.has_pr }}
+      pr_number: ${{ steps.check.outputs.pr_number }}
+    
+    steps:
+      - name: Check for open PR
+        id: check
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          
+          BRANCH="${GITHUB_REF#refs/heads/}"
+          REPO="${GITHUB_REPOSITORY}"
+          
+          echo "🔍 Checking if branch '$BRANCH' has an open PR..."
+          
+          # Consultar la API de GitHub para buscar PRs abiertos de esta rama
+          PR_DATA=$(curl -sS -H "Authorization: token $GITHUB_TOKEN" \
+            "https://api.github.com/repos/$REPO/pulls?state=open&head=${GITHUB_REPOSITORY_OWNER}:${BRANCH}")
+          
+          PR_COUNT=$(echo "$PR_DATA" | jq '. | length')
+          
+          if [ "$PR_COUNT" -gt 0 ]; then
+            PR_NUMBER=$(echo "$PR_DATA" | jq -r '.[0].number')
+            echo "✅ Found open PR #$PR_NUMBER for branch '$BRANCH'"
+            echo "has_pr=true" >> $GITHUB_OUTPUT
+            echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+          else
+            echo "ℹ️  No open PR found for branch '$BRANCH'"
+            echo "⏭️  Pipeline will be skipped"
+            echo "has_pr=false" >> $GITHUB_OUTPUT
+            echo "pr_number=" >> $GITHUB_OUTPUT
+          fi
+
+  # Job 2: CI (Tests + Build) - Solo si hay PR abierto
   ci-backend:
-    if: github.event_name == 'pull_request'
+    name: CI Backend (Tests + Build)
+    needs: check-pr-open
+    if: needs.check-pr-open.outputs.has_pr == 'true'
     runs-on: ubuntu-latest
 
     services:
@@ -38,25 +79,25 @@ jobs:
       DATABASE_URL: postgresql://test:test@localhost:5432/testdb
 
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "20"
           cache: "npm"
           cache-dependency-path: backend/package-lock.json
 
-      - name: Install deps (backend)
+      - name: Install dependencies
         working-directory: backend
         run: npm ci
 
-      - name: Prisma generate
+      - name: Generate Prisma Client
         working-directory: backend
         run: npm run prisma:generate
 
-      - name: Apply migrations (CI)
+      - name: Apply database migrations
         working-directory: backend
         run: npx prisma migrate deploy
 
@@ -82,9 +123,13 @@ jobs:
         with:
           name: backend-artifact
           path: backend-artifact.tar.gz
+          retention-days: 1
 
+  # Job 3: Deploy to EC2 - Solo si CI pasó
   deploy-backend:
-    if: github.event_name == 'push'
+    name: Deploy to EC2
+    needs: [check-pr-open, ci-backend]
+    if: needs.check-pr-open.outputs.has_pr == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -93,16 +138,17 @@ jobs:
         with:
           name: backend-artifact
 
-      - name: Install SSH key (uses LIDRKEY)
+      - name: Install SSH key
         run: |
           set -euo pipefail
           mkdir -p ~/.ssh
           echo "${{ secrets.LIDRKEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
 
-          # Validate key format early
+          # Validate key format
           ssh-keygen -lf ~/.ssh/id_rsa >/dev/null
 
+          # Add EC2 host to known_hosts
           ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts
 
       - name: Copy artifact to EC2
@@ -111,7 +157,7 @@ jobs:
           scp -i ~/.ssh/id_rsa backend-artifact.tar.gz \
             "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:${{ secrets.APP_DIR }}/backend-artifact.tar.gz"
 
-      - name: Deploy on EC2 (install, migrate, restart)
+      - name: Deploy on EC2
         run: |
           set -euo pipefail
           ssh -i ~/.ssh/id_rsa "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" \
@@ -120,32 +166,43 @@ jobs:
 
             APP_DIR="${APP_DIR:-/home/ubuntu/app}"
 
-            # Safety checks: avoid catastrophic deletion if APP_DIR is wrong
+            # Safety checks
             if [ -z "$APP_DIR" ] || [ "$APP_DIR" = "/" ] || [ "$APP_DIR" = "/home" ] || [ "$APP_DIR" = "/home/ubuntu" ]; then
-              echo "ERROR: APP_DIR is unsafe: '$APP_DIR'"
+              echo "❌ ERROR: APP_DIR is unsafe: '$APP_DIR'"
               exit 1
             fi
 
+            echo "📦 Deploying to $APP_DIR..."
             mkdir -p "$APP_DIR/current"
             rm -rf "$APP_DIR/current"/*
 
-            # Unpack artifact into $APP_DIR/current/backend/...
+            # Extract artifact
             tar -xzf "$APP_DIR/backend-artifact.tar.gz" -C "$APP_DIR/current"
             cd "$APP_DIR/current/backend"
 
-            # Write runtime env
+            # Write environment variables
             if [ -z "${DATABASE_URL:-}" ]; then
-              echo "ERROR: DATABASE_URL is empty on remote"
+              echo "❌ ERROR: DATABASE_URL is empty"
               exit 1
             fi
             echo "DATABASE_URL=$DATABASE_URL" > .env
+            echo "NODE_ENV=production" >> .env
+            echo "PORT=3000" >> .env
 
-            # Prisma CLI is in devDependencies -> do NOT omit dev
+            # Install dependencies (Prisma CLI needed)
+            echo "📥 Installing dependencies..."
             npm ci
+
+            # Generate Prisma Client
+            echo "🔧 Generating Prisma Client..."
             npm run prisma:generate
+
+            # Apply migrations
+            echo "🗄️  Applying database migrations..."
             npx prisma migrate deploy
 
-            # Start/restart via PM2 using package.json start (node dist/index.js)
+            # Start/restart with PM2
+            echo "🚀 Starting/restarting backend with PM2..."
             if pm2 describe backend >/dev/null 2>&1; then
               pm2 restart backend --update-env
             else
@@ -154,9 +211,29 @@ jobs:
 
             pm2 save
 
-            echo "✅ PM2 status:"
+            echo ""
+            echo "✅ Deployment completed successfully!"
+            echo ""
+            echo "📊 PM2 Status:"
             pm2 status
 
-            echo "✅ Local health check:"
-            curl -fsS http://localhost:3000 >/dev/null && echo "Backend responding on :3000"
+            echo ""
+            echo "🏥 Health check:"
+            sleep 3
+            if curl -fsS http://localhost:3000 >/dev/null 2>&1; then
+              echo "✅ Backend is responding on :3000"
+            else
+              echo "⚠️  Backend not responding yet (may need more time to start)"
+            fi
 EOF
+
+      - name: Deployment summary
+        run: |
+          echo "## 🚀 Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ **Backend deployed successfully to EC2**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **PR**: #${{ needs.check-pr-open.outputs.pr_number }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch**: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **EC2 Host**: ${{ secrets.EC2_HOST }}" >> $GITHUB_STEP_SUMMARY
