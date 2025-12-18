@@ -3,7 +3,7 @@
 This project is a full-stack application with a React frontend and an Express backend using Prisma as an ORM. The frontend is initiated with Create React App, and the backend is written in TypeScript.
 
 ## Directory and File Explanation
-
+ 
 - `backend/`: Contains the server-side code written in Node.js.
   - `src/`: Contains the source code for the backend.
     - `index.ts`: The entry point for the backend server.
