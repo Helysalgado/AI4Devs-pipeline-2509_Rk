@@ -161,18 +161,18 @@ jobs:
         run: |
           set -euo pipefail
           ssh -i ~/.ssh/id_rsa "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" \
-          "APP_DIR='${{ secrets.APP_DIR }}' DATABASE_URL='${{ secrets.DATABASE_URL }}' bash -s" <<'EOF'
+          "APP_DIR='${{ secrets.APP_DIR }}' DATABASE_URL='${{ secrets.DATABASE_URL }}' bash -s" <<'EOFMARKER'
             set -euo pipefail
 
             APP_DIR="${APP_DIR:-/home/ubuntu/app}"
 
             # Safety checks
             if [ -z "$APP_DIR" ] || [ "$APP_DIR" = "/" ] || [ "$APP_DIR" = "/home" ] || [ "$APP_DIR" = "/home/ubuntu" ]; then
-              echo "❌ ERROR: APP_DIR is unsafe: '$APP_DIR'"
+              echo "ERROR: APP_DIR is unsafe: $APP_DIR"
               exit 1
             fi
 
-            echo "📦 Deploying to $APP_DIR..."
+            echo "Deploying to $APP_DIR..."
             mkdir -p "$APP_DIR/current"
             rm -rf "$APP_DIR/current"/*
 
@@ -182,7 +182,7 @@ jobs:
 
             # Write environment variables
             if [ -z "${DATABASE_URL:-}" ]; then
-              echo "❌ ERROR: DATABASE_URL is empty"
+              echo "ERROR: DATABASE_URL is empty"
               exit 1
             fi
             echo "DATABASE_URL=$DATABASE_URL" > .env
@@ -190,19 +190,19 @@ jobs:
             echo "PORT=3000" >> .env
 
             # Install dependencies (Prisma CLI needed)
-            echo "📥 Installing dependencies..."
+            echo "Installing dependencies..."
             npm ci
 
             # Generate Prisma Client
-            echo "🔧 Generating Prisma Client..."
+            echo "Generating Prisma Client..."
             npm run prisma:generate
 
             # Apply migrations
-            echo "🗄️  Applying database migrations..."
+            echo "Applying database migrations..."
             npx prisma migrate deploy
 
             # Start/restart with PM2
-            echo "🚀 Starting/restarting backend with PM2..."
+            echo "Starting/restarting backend with PM2..."
             if pm2 describe backend >/dev/null 2>&1; then
               pm2 restart backend --update-env
             else
@@ -212,20 +212,20 @@ jobs:
             pm2 save
 
             echo ""
-            echo "✅ Deployment completed successfully!"
+            echo "Deployment completed successfully!"
             echo ""
-            echo "📊 PM2 Status:"
+            echo "PM2 Status:"
             pm2 status
 
             echo ""
-            echo "🏥 Health check:"
+            echo "Health check:"
             sleep 3
             if curl -fsS http://localhost:3000 >/dev/null 2>&1; then
-              echo "✅ Backend is responding on :3000"
+              echo "Backend is responding on :3000"
             else
-              echo "⚠️  Backend not responding yet (may need more time to start)"
+              echo "Backend not responding yet (may need more time to start)"
             fi
-EOF
+EOFMARKER
 
       - name: Deployment summary
         run: |
