@@ -513,3 +513,4 @@ Para que el flujo de trabajo de GitHub Actions funcione correctamente, debes con
 
 **Recuerda**: El objetivo es demostrar que puedes crear y mantener un pipeline de CI/CD funcional. La validación en tu propio fork es fundamental antes de solicitar la revisión del instructor.
 
+# PostgreSQL configurado
