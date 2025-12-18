@@ -97,13 +97,14 @@ jobs:
           name: backend-artifact
 
       - name: Install SSH key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.LIDRKEY }}
+      
+      - name: Add EC2 to known hosts
         run: |
           mkdir -p ~/.ssh
-          printf "%s\n" "${{ secrets.LIDRKEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts
-        env:
-          SSH_KEY: ${{ secrets.LIDRKEY }}
 
       - name: Copy artifact to EC2
         run: |
