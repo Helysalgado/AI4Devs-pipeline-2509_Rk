@@ -1,9 +1,11 @@
 name: Backend CI/CD Pipeline (Push con PR abierto)
 
 on:
+  pull_request:
+    types: [opened, synchronize, reopened]
   push:
-    branches-ignore:
-      - main
+    branches:
+      - pipeline-hso
 
 permissions:
   contents: read
@@ -14,57 +16,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check-pr-open:
-    name: Check if PR is open
-    runs-on: ubuntu-latest
-    outputs:
-      has_pr: ${{ steps.check.outputs.has_pr }}
-      pr_number: ${{ steps.check.outputs.pr_number }}
-    
-    steps:
-      - name: Check for open PR
-        id: check
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          BRANCH="${GITHUB_REF#refs/heads/}"
-          REPO="${GITHUB_REPOSITORY}"
-          OWNER="${GITHUB_REPOSITORY_OWNER}"
-          echo "Checking if branch $BRANCH has an open PR..."
-          echo "Repository: $REPO"
-          echo "Owner: $OWNER"
-          
-          # Try with owner:branch format (for forks)
-          PR_DATA=$(curl -sS -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/$REPO/pulls?state=open&head=${OWNER}:${BRANCH}")
-          PR_COUNT=$(echo "$PR_DATA" | jq '. | length')
-          
-          # If no PR found, try without owner prefix (for same repo)
-          if [ "$PR_COUNT" -eq 0 ]; then
-            echo "No PR found with ${OWNER}:${BRANCH}, trying just ${BRANCH}..."
-            PR_DATA=$(curl -sS -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/$REPO/pulls?state=open")
-            PR_COUNT=$(echo "$PR_DATA" | jq "[.[] | select(.head.ref == \"$BRANCH\")] | length")
-            if [ "$PR_COUNT" -gt 0 ]; then
-              PR_DATA=$(echo "$PR_DATA" | jq "[.[] | select(.head.ref == \"$BRANCH\")]")
-            fi
-          fi
-          
-          if [ "$PR_COUNT" -gt 0 ]; then
-            PR_NUMBER=$(echo "$PR_DATA" | jq -r '.[0].number')
-            echo "Found open PR #$PR_NUMBER for branch $BRANCH"
-            echo "has_pr=true" >> $GITHUB_OUTPUT
-            echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
-          else
-            echo "No open PR found for branch $BRANCH"
-            echo "Pipeline will be skipped"
-            echo "has_pr=false" >> $GITHUB_OUTPUT
-            echo "pr_number=" >> $GITHUB_OUTPUT
-          fi
-
   ci-backend:
     name: CI Backend (Tests + Build)
-    needs: check-pr-open
-    if: needs.check-pr-open.outputs.has_pr == 'true'
     runs-on: ubuntu-latest
 
     services:
@@ -134,8 +87,7 @@ jobs:
 
   deploy-backend:
     name: Deploy to EC2
-    needs: [check-pr-open, ci-backend]
-    if: needs.check-pr-open.outputs.has_pr == 'true'
+    needs: ci-backend
     runs-on: ubuntu-latest
 
     steps:
@@ -208,7 +160,6 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Backend deployed successfully to EC2" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- PR: #${{ needs.check-pr-open.outputs.pr_number }}" >> $GITHUB_STEP_SUMMARY
           echo "- Branch: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
           echo "- Commit: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
           echo "- EC2 Host: ${{ secrets.EC2_HOST }}" >> $GITHUB_STEP_SUMMARY
