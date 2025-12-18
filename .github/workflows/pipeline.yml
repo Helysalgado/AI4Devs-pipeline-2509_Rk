@@ -30,9 +30,25 @@ jobs:
           set -euo pipefail
           BRANCH="${GITHUB_REF#refs/heads/}"
           REPO="${GITHUB_REPOSITORY}"
+          OWNER="${GITHUB_REPOSITORY_OWNER}"
           echo "Checking if branch $BRANCH has an open PR..."
-          PR_DATA=$(curl -sS -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/$REPO/pulls?state=open&head=${GITHUB_REPOSITORY_OWNER}:${BRANCH}")
+          echo "Repository: $REPO"
+          echo "Owner: $OWNER"
+          
+          # Try with owner:branch format (for forks)
+          PR_DATA=$(curl -sS -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/$REPO/pulls?state=open&head=${OWNER}:${BRANCH}")
           PR_COUNT=$(echo "$PR_DATA" | jq '. | length')
+          
+          # If no PR found, try without owner prefix (for same repo)
+          if [ "$PR_COUNT" -eq 0 ]; then
+            echo "No PR found with ${OWNER}:${BRANCH}, trying just ${BRANCH}..."
+            PR_DATA=$(curl -sS -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/$REPO/pulls?state=open")
+            PR_COUNT=$(echo "$PR_DATA" | jq "[.[] | select(.head.ref == \"$BRANCH\")] | length")
+            if [ "$PR_COUNT" -gt 0 ]; then
+              PR_DATA=$(echo "$PR_DATA" | jq "[.[] | select(.head.ref == \"$BRANCH\")]")
+            fi
+          fi
+          
           if [ "$PR_COUNT" -gt 0 ]; then
             PR_NUMBER=$(echo "$PR_DATA" | jq -r '.[0].number')
             echo "Found open PR #$PR_NUMBER for branch $BRANCH"
